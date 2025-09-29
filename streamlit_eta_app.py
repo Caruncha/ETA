@@ -25,32 +25,57 @@ use_default = st.checkbox("Utiliser le fichier local par défaut: accuracy_gener
 EXPECTED_COLS = {"agency","route","bucket","source","Early","Late","Accurate","Predictions"}
 BUCKETS_DEFAULT = ["0 - 3 min","3 - 6 min","6 - 10 min","10 - 15 min"]
 
-# --- Helpers ---
+# Palette demandée: Précis=vert, En avance=rouge, En retard=orange
+COLOR_MAP = {
+    'Précis': '#2ca02c',       # vert
+    'En avance': '#d62728',    # rouge
+    'En retard': '#ff7f0e'     # orange
+}
+
+# ---------------- Helpers ----------------
 
 def _standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Standardise les colonnes et types, corrige les espaces/variantes d'écriture.
-    (Corrige le bug 'Series' has no attribute strip en utilisant .str.strip())"""
+    """Standardise colonnes/types, buckets et calcule un groupe de ligne."""
     df = df.copy()
     df.columns = [c.strip() for c in df.columns]
     missing = EXPECTED_COLS - set(df.columns)
     if missing:
         raise ValueError(f"Colonnes manquantes: {', '.join(sorted(missing))}")
-    # Types numériques
+    # Casts
     for col in ["Early","Late","Accurate","Predictions"]:
         df[col] = pd.to_numeric(df[col], errors='coerce')
-    # Types texte
     df['route']  = df['route'].astype(str)
     df['bucket'] = df['bucket'].astype(str).str.strip()
     df['agency'] = df['agency'].astype(str).str.strip()
     df['source'] = df['source'].astype(str).str.strip()
-    # Normalisation des buckets: unifier tirets/espaces
+    # Normalisation bucket (espaces/tirets)
     def norm_bucket(val: str) -> str:
         s = (val or '').strip()
         s = s.replace('–','-').replace('—','-')
         s = re.sub(r"\s*-\s*", " - ", s)
         return s
     df['bucket'] = df['bucket'].map(norm_bucket)
-    # Nettoyage basique
+    # Groupe de lignes (priorité: Aéroport > Haute fréquence > Nuit(300) > Express(400) > Navette(700/800) > Autre)
+    HF_SET = {"18","24","51","67","105","121","141","165","439"}
+    def line_group(route_str: str) -> str:
+        try:
+            f = float(route_str)
+            n = int(f)
+        except Exception:
+            return 'Autre'
+        if n == 747:
+            return 'Aéroport'
+        if route_str in HF_SET or str(n) in HF_SET:
+            return 'Haute fréquence'
+        if 300 <= n < 400:
+            return 'Nuit'
+        if 400 <= n < 500:
+            return 'Express'
+        if 700 <= n < 900:
+            return 'Navette'
+        return 'Autre'
+    df['group'] = df['route'].apply(line_group)
+    # Nettoyage lignes invalides
     df = df.dropna(subset=["Early","Late","Accurate","Predictions"]) 
     return df
 
@@ -59,7 +84,6 @@ def _load_df(file):
     """Accepte un fichier uploadé (Streamlit) OU un chemin local (Path/str)."""
     if file is None:
         return None
-    # Chemin local
     if isinstance(file, (str, Path)):
         p = Path(file)
         if p.suffix.lower() == '.csv':
@@ -67,7 +91,6 @@ def _load_df(file):
         else:
             df = pd.read_excel(p)
         return _standardize_columns(df)
-    # Fichier uploadé
     name = getattr(file, 'name', '').lower()
     if name.endswith('.csv'):
         df = pd.read_csv(file)
@@ -84,7 +107,6 @@ def weighted_avg(values, weights):
     return np.average(v, weights=w)
 
 # ---------- Chargement des données ----------
-
 if uploaded is not None:
     try:
         df = _load_df(uploaded)
@@ -112,10 +134,14 @@ with st.sidebar:
     st.markdown("**2) Filtres**")
     agencies = sorted(df['agency'].dropna().unique().tolist())
     sources = sorted(df['source'].dropna().unique().tolist())
+    groups = ['Haute fréquence','Aéroport','Nuit','Express','Navette','Autre']
+    groups_present = [g for g in groups if g in df['group'].unique()]
     buckets_all = [b for b in BUCKETS_DEFAULT if b in df['bucket'].unique()]
 
     agency_sel = st.multiselect("Agence(s)", agencies, default=agencies)
     source_sel = st.multiselect("Source(s)", sources, default=sources)
+    group_sel  = st.multiselect("Groupe(s) de lignes", groups_present, default=groups_present,
+                                help="Règles: 300=Nuit, 400=Express, 700-800=Navette, 747=Aéroport, HF={18,24,51,67,105,121,141,165,439}")
     buckets_sel = st.multiselect("Horizon(s) inclus pour les KPIs", buckets_all, default=buckets_all)
 
     st.markdown("**Filtre lignes**")
@@ -135,7 +161,12 @@ with st.sidebar:
     show_n = st.slider("Nombre de lignes à afficher (Top & Bottom)", min_value=5, max_value=20, value=10, step=1)
 
 # Appliquer filtres
-filt = df[df['agency'].isin(agency_sel) & df['source'].isin(source_sel) & df['route'].isin(route_sel)].copy()
+filt = df[
+    df['agency'].isin(agency_sel) &
+    df['source'].isin(source_sel) &
+    df['group'].isin(group_sel) &
+    df['route'].isin(route_sel)
+].copy()
 
 # ---------------------
 # Calculs des indicateurs
@@ -162,9 +193,10 @@ by_bucket = (
     })).reset_index()
 )
 
-overall_rows = filt[filt['bucket']=="Overall average: Equally Weighted Predictions"][['agency','route','source','Early','Late','Accurate','Predictions']].copy()
+# Overall par ligne (Equally Weighted Predictions si fourni)
+overall_rows = filt[filt['bucket']=="Overall average: Equally Weighted Predictions"][['agency','route','source','group','Early','Late','Accurate','Predictions']].copy()
 if overall_rows.empty:
-    agg = rows.groupby(['agency','route','source']).apply(lambda g: pd.Series({
+    agg = rows.groupby(['agency','route','source','group']).apply(lambda g: pd.Series({
         'Early': weighted_avg(g['Early'], g['Predictions']),
         'Late': weighted_avg(g['Late'], g['Predictions']),
         'Accurate': weighted_avg(g['Accurate'], g['Predictions']),
@@ -200,13 +232,15 @@ line = (
     .encode(
         x=alt.X('bucket:N', title='Horizon avant arrivée'),
         y=alt.Y('Pourcentage:Q', title='Pourcentage pondéré', scale=alt.Scale(domain=[0,100])),
-        color=alt.Color('Type:N', title='Catégorie', scale=alt.Scale(range=['#2ca02c','#1f77b4','#d62728'])),
+        color=alt.Color('Type:N', title='Catégorie', scale=alt.Scale(range=[COLOR_MAP['Précis'], COLOR_MAP['En avance'], COLOR_MAP['En retard']])),
         tooltip=['bucket','Type',alt.Tooltip('Pourcentage:Q', format='.1f'),'Predictions']
     ).properties(height=300)
 )
 st.altair_chart(line, use_container_width=True)
 
 st.dataframe(by_bucket.rename(columns={'bucket':'Bucket','Accurate_%':'% Précis','Early_%':'% En avance','Late_%':'% En retard','Predictions':'Prédictions'}), use_container_width=True)
+
+st.caption("Couleurs: **Précis=vert**, **En avance=rouge**, **En retard=orange**.")
 
 st.divider()
 
@@ -232,6 +266,8 @@ botN = hi.sort_values('Accurate', ascending=True).head(show_n)
 
 st.caption(f"{hi['route'].nunique()} lignes passent le seuil (sur {overall_rows['route'].nunique()} lignes filtrées). Seuil = {thresh:,} prédictions.")
 
+# Stacked bar (composition ETA)
+
 def stacked_bar(df_in, title):
     if df_in.empty:
         return alt.Chart(pd.DataFrame({'x':[0]})).mark_text(text='Aucune ligne au-dessus du seuil').properties(title=title)
@@ -244,7 +280,7 @@ def stacked_bar(df_in, title):
         .encode(
             y=alt.Y('Ligne:N', sort='-x', title='Ligne'),
             x=alt.X('Pourcentage:Q', title='Pourcentage (%)', scale=alt.Scale(domain=[0,100])),
-            color=alt.Color('Type:N', scale=alt.Scale(range=['#2ca02c','#1f77b4','#d62728'])),
+            color=alt.Color('Type:N', scale=alt.Scale(range=[COLOR_MAP['Précis'], COLOR_MAP['En avance'], COLOR_MAP['En retard']])),
             tooltip=['Ligne','Type',alt.Tooltip('Pourcentage:Q', format='.1f'),'Predictions']
         )
         .properties(title=title, height=300)
@@ -272,8 +308,8 @@ bubble = (
         x=alt.X('Early:Q', title='% En avance', scale=alt.Scale(domain=[0, max(5, float(scatter_df['Early'].max())+5)])),
         y=alt.Y('Accurate:Q', title='% Précis', scale=alt.Scale(domain=[0, 100])),
         size=alt.Size('Predictions:Q', title='Volume prédictions', scale=alt.Scale(range=[20, 800])),
-        color=alt.Color('agency:N', title='Agence'),
-        tooltip=['Ligne','agency','source',alt.Tooltip('Accurate:Q', format='.1f'),alt.Tooltip('Early:Q', format='.1f'),alt.Tooltip('Late:Q', format='.1f'),'Predictions']
+        color=alt.Color('group:N', title='Groupe', legend=alt.Legend(orient='right')),
+        tooltip=['Ligne','group','agency','source',alt.Tooltip('Accurate:Q', format='.1f'),alt.Tooltip('Early:Q', format='.1f'),alt.Tooltip('Late:Q', format='.1f'),'Predictions']
     )
     .properties(height=380)
     .interactive()
@@ -301,7 +337,7 @@ if not prof.empty:
         .encode(
             x=alt.X('bucket:N', title='Horizon'),
             y=alt.Y('Pourcentage:Q', title='Pourcentage (%)', scale=alt.Scale(domain=[0,100])),
-            color=alt.Color('Type:N', scale=alt.Scale(range=['#2ca02c','#1f77b4','#d62728'])),
+            color=alt.Color('Type:N', scale=alt.Scale(range=[COLOR_MAP['Précis'], COLOR_MAP['En avance'], COLOR_MAP['En retard']])),
             tooltip=['bucket','Type',alt.Tooltip('Pourcentage:Q', format='.1f'),'Predictions']
         )
         .properties(title=f"Ligne {route_focus} – composition par horizon", height=320)
@@ -317,7 +353,7 @@ st.divider()
 # -------------------------------
 st.subheader("Données détaillées – téléchargement")
 
-overall_dl = overall_rows[['agency','route','source','Early','Late','Accurate','Predictions']].copy().sort_values('route')
+overall_dl = overall_rows[['agency','route','source','group','Early','Late','Accurate','Predictions']].copy().sort_values('route')
 st.download_button(
     label="Télécharger – Overall par ligne (CSV)",
     data=overall_dl.to_csv(index=False).encode('utf-8'),
