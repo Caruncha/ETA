@@ -27,9 +27,9 @@ BUCKETS_DEFAULT = ["0 - 3 min","3 - 6 min","6 - 10 min","10 - 15 min"]
 
 # Palette demandée: Précis=vert, En avance=rouge, En retard=orange
 COLOR_MAP = {
-    'Précis': '#2ca02c',       # vert
-    'En avance': '#d62728',    # rouge
-    'En retard': '#ff7f0e'     # orange
+    'Précis': '#d62728',       # vert
+    'En avance': '#ff7f0e',    # rouge
+    'En retard': '#2ca02c'     # orange
 }
 
 # ---------------- Helpers ----------------
