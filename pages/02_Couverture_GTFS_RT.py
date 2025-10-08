@@ -36,9 +36,9 @@ EXPECTED_COLS_COV = {
 TIME_ORDER = ["Rush AM", "Rush PM", "Off-Peak", "All"]
 
 COLOR_MAP = {
-    "Couvert": "#2ca02c",      # vert
-    "Entièrement manquant": "#d62728",  # rouge
-    "Autres manquants": "#ff7f0e"       # orange
+    "Couvert": "#ff7f0e",      # vert
+    "Entièrement manquant": "#2ca02c",  # rouge
+    "Autres manquants": "#d62728"       # orange
 }
 
 def _load_coverage(file_or_path):
